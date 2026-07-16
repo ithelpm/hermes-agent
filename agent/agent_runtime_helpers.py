@@ -83,6 +83,15 @@ def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_que
     Returns:
         List[Dict]: Messages in trajectory format
     """
+    # Structural sweep: ephemeral recovery scaffolding (synthetic nudge
+    # pairs, empty-response sentinels, prefill placeholders) must never
+    # reach a saved trajectory.  The conversation loop pops trailing
+    # scaffolding before the final response, but rows buried under later
+    # tool turns are not trailing — filtering here guards the invariant
+    # regardless of where the scaffolding ended up in the list, mirroring
+    # the per-message filter in the session-store flush.
+    _is_scaffolding = _ra()._is_ephemeral_scaffolding
+    messages = [m for m in messages if not _is_scaffolding(m)]
     # Normalize multimodal tool results — trajectories are text-only, so
     # replace image-bearing tool messages with their text_summary to avoid
     # embedding ~1MB base64 blobs into every saved trajectory.

@@ -4839,6 +4839,19 @@ def run_conversation(
                 if _had_prefill:
                     agent._thinking_prefill_retries = 0
                     agent._empty_content_retries = 0
+                # Pop the progress-placeholder nudge pair once the nudge
+                # succeeds and the model answers with tool calls (#42503).
+                # The terminal scaffold pop before the final response only
+                # strips a trailing suffix, so if these rows survive here
+                # they become interior — buried under the new tool turns —
+                # and stay in the live context (replayed to the model on
+                # every later call) and in anything assembled from it.
+                while (
+                    messages
+                    and isinstance(messages[-1], dict)
+                    and messages[-1].get("_post_tool_placeholder_synthetic")
+                ):
+                    messages.pop()
                 # Successful tool execution — reset the post-tool nudge
                 # flag so it can fire again if the model goes empty on
                 # a LATER tool round.

@@ -208,6 +208,95 @@ class TestPostToolPlaceholderNudge:
             a == b == "assistant" for a, b in zip(roles, roles[1:])
         )
 
+    def test_tool_call_after_nudge_leaves_no_buried_scaffolding(self, agent):
+        """When the nudge succeeds via ANOTHER tool call, the synthetic pair
+        would be buried under the new tool turns — the terminal pop only
+        strips a trailing suffix, so without the tool-call-path pop the fake
+        placeholder/nudge rows stay in the live context forever and leak
+        into everything assembled from the message list (PR #57610 review)."""
+        tc1 = _mock_tool_call(call_id="c1")
+        tc2 = _mock_tool_call(call_id="c2")
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc1]),
+            _mock_response(content="Working on it..."),
+            _mock_response(content="", finish_reason="tool_calls", tool_calls=[tc2]),
+            _mock_response(content="Task finished: both lookups done."),
+        ]
+        result = _run(agent)
+        assert result["completed"] is True
+        assert result["final_response"] == "Task finished: both lookups done."
+        # The scaffold pair must be gone even though it is no longer a
+        # trailing suffix — this is the buried-scaffold regression.
+        assert all(
+            not m.get("_post_tool_placeholder_synthetic")
+            for m in result["messages"]
+            if isinstance(m, dict)
+        )
+        # The placeholder note itself must not survive as transcript context.
+        assert all(
+            "Working on it..." != m.get("content")
+            for m in result["messages"]
+            if isinstance(m, dict)
+        )
+
+    def test_trajectory_conversion_drops_buried_scaffolding(self, agent):
+        """Trajectory saving converts the raw message list; a scaffold pair
+        buried mid-list (nudge followed by more tool calls) must be filtered
+        there too, or save_trajectories=True records the synthetic turns as
+        if the model had really said them (PR #57610 review)."""
+        nudge_text = (
+            "[System: Your previous message was a progress update, not a "
+            "final answer. Continue the task now.]"
+        )
+        messages = [
+            {"role": "user", "content": "do the task"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "web_search", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": "r1"},
+            # Buried scaffold pair: nudge fired, then the model continued
+            # with another tool call, so these rows are interior.
+            {
+                "role": "assistant",
+                "content": "Working on it...",
+                "_post_tool_placeholder_synthetic": True,
+            },
+            {
+                "role": "user",
+                "content": nudge_text,
+                "_post_tool_placeholder_synthetic": True,
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {"name": "web_search", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c2", "name": "web_search", "content": "r2"},
+            {"role": "assistant", "content": "All done."},
+        ]
+        trajectory = agent._convert_to_trajectory_format(
+            messages, "do the task", completed=True
+        )
+        values = [t["value"] for t in trajectory]
+        assert not any(nudge_text in v for v in values)
+        assert not any("Working on it..." in v for v in values)
+        # The real turns survive the sweep.
+        assert any("All done." in v for v in values)
+
     def test_exhausted_nudges_surface_incomplete_turn_explanation(self, agent):
         """If the model keeps emitting placeholders after 2 nudges, the turn
         must end VISIBLY incomplete — never silently (#42503's core complaint:
