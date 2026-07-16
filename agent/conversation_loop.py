@@ -4818,16 +4818,27 @@ def run_conversation(
                         if clean:
                             agent._vprint(f"  ┊ 💬 {clean}")
                 
-                # Pop thinking-only prefill message(s) before appending
-                # (tool-call path — same rationale as the final-response path).
+                # Pop thinking-only prefill and progress-placeholder nudge
+                # scaffolding before appending (tool-call path — same
+                # rationale as the final-response path).  Must be ONE loop
+                # over both flags: the rows can interleave (tool round →
+                # thinking-only prefill → placeholder nudge → tool calls
+                # leaves [prefill, placeholder, nudge] on the stack), and
+                # sequential single-flag loops strand whichever flag sits
+                # beneath the other — the buried row then replays as fake
+                # context on every later call.
                 _had_prefill = False
                 while (
                     messages
                     and isinstance(messages[-1], dict)
-                    and messages[-1].get("_thinking_prefill")
+                    and (
+                        messages[-1].get("_thinking_prefill")
+                        or messages[-1].get("_post_tool_placeholder_synthetic")
+                    )
                 ):
+                    if messages[-1].get("_thinking_prefill"):
+                        _had_prefill = True
                     messages.pop()
-                    _had_prefill = True
 
                 # Reset prefill counter when tool calls follow a prefill
                 # recovery.  Without this, the counter accumulates across
@@ -4839,19 +4850,6 @@ def run_conversation(
                 if _had_prefill:
                     agent._thinking_prefill_retries = 0
                     agent._empty_content_retries = 0
-                # Pop the progress-placeholder nudge pair once the nudge
-                # succeeds and the model answers with tool calls (#42503).
-                # The terminal scaffold pop before the final response only
-                # strips a trailing suffix, so if these rows survive here
-                # they become interior — buried under the new tool turns —
-                # and stay in the live context (replayed to the model on
-                # every later call) and in anything assembled from it.
-                while (
-                    messages
-                    and isinstance(messages[-1], dict)
-                    and messages[-1].get("_post_tool_placeholder_synthetic")
-                ):
-                    messages.pop()
                 # Successful tool execution — reset the post-tool nudge
                 # flag so it can fire again if the model goes empty on
                 # a LATER tool round.

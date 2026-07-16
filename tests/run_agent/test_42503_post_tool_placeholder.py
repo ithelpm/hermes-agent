@@ -239,6 +239,47 @@ class TestPostToolPlaceholderNudge:
             if isinstance(m, dict)
         )
 
+    def test_interleaved_prefill_and_placeholder_scaffolds_all_popped(self, agent):
+        """tool round → thinking-only (prefill row) → placeholder (nudge pair)
+        → tool calls leaves [prefill, placeholder, nudge] stacked.  The
+        tool-call-path cleanup must pop across BOTH flags in one loop —
+        sequential single-flag loops strand the prefill row beneath the
+        popped nudge pair, leaving a fake assistant turn (and consecutive
+        assistant messages) in the live context forever."""
+        agent.client.chat.completions.create.side_effect = [
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[_mock_tool_call(call_id="c1")],
+            ),
+            # In-content <think> routes to the prefill recovery, not the
+            # empty-response nudge (see _has_inline_thinking in the loop).
+            _mock_response(content="<think>planning the next step</think>"),
+            _mock_response(content="Working on it..."),
+            _mock_response(
+                content="",
+                finish_reason="tool_calls",
+                tool_calls=[_mock_tool_call(call_id="c2")],
+            ),
+            _mock_response(content="Done: everything checked."),
+        ]
+        result = _run(agent)
+        assert result["completed"] is True
+        assert result["final_response"] == "Done: everything checked."
+        leftovers = [
+            m
+            for m in result["messages"]
+            if isinstance(m, dict)
+            and (
+                m.get("_thinking_prefill")
+                or m.get("_post_tool_placeholder_synthetic")
+            )
+        ]
+        assert leftovers == []
+        # No consecutive assistant rows left by a stranded scaffold.
+        roles = [m.get("role") for m in result["messages"] if isinstance(m, dict)]
+        assert not any(a == b == "assistant" for a, b in zip(roles, roles[1:]))
+
     def test_trajectory_conversion_drops_buried_scaffolding(self, agent):
         """Trajectory saving converts the raw message list; a scaffold pair
         buried mid-list (nudge followed by more tool calls) must be filtered
